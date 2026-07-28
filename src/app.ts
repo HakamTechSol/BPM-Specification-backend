@@ -1,0 +1,82 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import dotenv from 'dotenv';
+import { networkInterfaces } from 'os';
+
+import { securityMiddleware } from './middleware/security';
+import pitchRoutes from './routes/pitchRoutes';
+import authRoutes from './routes/authRoutes';
+import guestRoutes from './routes/guestRoutes';
+import settingsRoutes from './routes/settingsRoutes';
+import failureRoutes from './routes/failureRoutes';
+import maintenanceRoutes from './routes/maintenanceRoutes';
+
+dotenv.config();
+
+const app = express();
+const PORT = parseInt(process.env.PORT || '3000', 10);
+
+const ALLOWED_ORIGINS = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:3001,http://localhost:8080').split(',');
+
+// ── Request logger (debug) ──────────────────────────
+app.use((req: Request, _res: Response, next: NextFunction) => {
+  console.log(`[${req.method}] ${req.path}`);
+  next();
+});
+
+app.use(helmet());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      callback(null, origin || true);
+    } else {
+      callback(new Error(`Origin ${origin} not allowed by CORS`));
+    }
+  },
+  credentials: true,
+}));
+app.use(securityMiddleware);
+app.use(express.json());
+
+app.use('/api/auth', authRoutes);
+app.use('/api/pitch', pitchRoutes);
+app.use('/api/guest', guestRoutes);
+app.use('/api/settings', settingsRoutes);
+app.use('/api/failures', failureRoutes);
+app.use('/api/maintenance', maintenanceRoutes);
+
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({ status: 'ok', service: 'BluePlugMobile API' });
+});
+
+app.use((req: Request, res: Response) => {
+  console.error(`[404] ${req.method} ${req.originalUrl} — no route matched`);
+  res.status(404).json({ error: `Route not found: ${req.method} ${req.originalUrl}` });
+});
+
+app.use((err: Error, req: Request, res: Response, _next: NextFunction) => {
+  console.error(`[500] ${req.method} ${req.originalUrl}:`, err.message);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+const server = app.listen(PORT, () => {
+  console.log(`BluePlugMobile API running on port ${PORT}`);
+});
+
+server.on('error', (err: NodeJS.ErrnoException) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(`\n  Port ${PORT} is already in use by another process.`);
+    console.error(`  ─────────────────────────────────────────────`);
+    console.error(`  To fix, find and kill the process:`);
+    console.error(`    netstat -ano | findstr :${PORT}`);
+    console.error(`    taskkill //PID <PID> //F`);
+    console.error(`  Or use a different port:\n    PORT=${PORT + 1} npm start\n`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', err.message);
+    process.exit(1);
+  }
+});
+
+export default app;
