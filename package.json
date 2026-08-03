@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "ts-node-dev --respawn --transpile-only src/app.ts",
     "build": "tsc",
+    "build:secure": "tsc && node scripts/obfuscate.js",
     "start": "node dist/app.js",
     "typecheck": "tsc --noEmit"
   },
@@ -24,6 +25,7 @@
     "@types/express": "^5.0.0",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node": "^22.13.0",
+    "javascript-obfuscator": "^5.5.0",
     "ts-node-dev": "^2.0.0",
     "typescript": "^5.7.3"
   }
