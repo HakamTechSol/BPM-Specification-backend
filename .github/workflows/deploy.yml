@@ -25,6 +25,12 @@ jobs:
       - name: Build (TypeScript compile)
         run: npm run build
 
+      - name: Debug — list built dist contents
+        run: |
+          ls -la dist/
+          echo "---"
+          find dist -type f
+
       - name: Prepare remote directory
         uses: appleboy/ssh-action@v1
         with:
@@ -44,7 +50,7 @@ jobs:
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: |
-            dist/
+            dist
             package.json
             package-lock.json
           target: ~/html/blueplug-backend
