@@ -25,7 +25,7 @@ jobs:
       - name: Build (TypeScript compile)
         run: npm run build
 
-      - name: Debug — list built dist contents
+      - name: Debug - list built dist contents
         run: |
           ls -la dist/
           echo "---"
@@ -49,10 +49,7 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: |
-            dist
-            package.json
-            package-lock.json
+          source: dist,package.json,package-lock.json
           target: ~/html/blueplug-backend
 
       - name: Install production deps and restart service
