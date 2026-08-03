@@ -43,7 +43,10 @@ jobs:
           port: ${{ secrets.SSH_PORT }}
           username: ${{ secrets.SSH_USER }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          source: "dist/ package.json package-lock.json"
+          source: |
+            dist/
+            package.json
+            package-lock.json
           target: ~/html/blueplug-backend
 
       - name: Install production deps and restart service
