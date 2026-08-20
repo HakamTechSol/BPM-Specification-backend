@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { RowDataPacket, ResultSetHeader } from 'mysql2';
 import { getPool } from '../utils/db';
+import { getVeldnaamMap } from '../utils/veldnaam';
 
 interface StoringRow extends RowDataPacket {
   idstoring: number;
@@ -12,6 +13,7 @@ interface StoringRow extends RowDataPacket {
   EindTellerStand: number | null;
   StoringCode: number;
   Omschrijving: string | null;
+  veldnr: number | null;
 }
 
 const SEVERITY_MAP: Record<number, string> = {
@@ -28,11 +30,12 @@ function deriveSeverity(code: number): 'critical' | 'high' | 'warning' {
   return 'warning';
 }
 
-function mapRow(row: StoringRow) {
+function mapRow(row: StoringRow, veldnaamMap: Record<number, string>) {
   return {
     id: row.idstoring,
     pitchId: row.PlaatsId,
     pitchName: row.PlaatsNaam,
+    veldNaam: row.veldnr != null ? (veldnaamMap[row.veldnr] ?? '') : '',
     occurredAt: row.StartStoring,
     startMeterReading: row.StartTellerStand,
     resolvedAt: row.EindStoring,
@@ -55,14 +58,19 @@ export async function getAllFailures(
     // Active failures (no limit — all need attention)
     console.time('[failures] SELECT active');
     const [activeRows] = await pool.execute<StoringRow[]>(
-      'SELECT * FROM storing WHERE EindStoring IS NULL ORDER BY StartStoring DESC'
+      `SELECT s.*, g.veldnr FROM storing s
+       LEFT JOIN gegevens g ON s.PlaatsId = g.pltsnr
+       WHERE s.EindStoring IS NULL ORDER BY s.StartStoring DESC`
     );
     console.timeEnd('[failures] SELECT active');
 
     // Recent resolved failures: last 30 days, max 50
     console.time('[failures] SELECT resolved (30d + LIMIT 50)');
     const [resolvedRows] = await pool.execute<StoringRow[]>(
-      'SELECT * FROM storing WHERE EindStoring IS NOT NULL AND EindStoring >= DATE_SUB(NOW(), INTERVAL 30 DAY) ORDER BY EindStoring DESC LIMIT 50'
+      `SELECT s.*, g.veldnr FROM storing s
+       LEFT JOIN gegevens g ON s.PlaatsId = g.pltsnr
+       WHERE s.EindStoring IS NOT NULL AND s.EindStoring >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+       ORDER BY s.EindStoring DESC LIMIT 50`
     );
     console.timeEnd('[failures] SELECT resolved (30d + LIMIT 50)');
 
@@ -74,9 +82,11 @@ export async function getAllFailures(
     console.timeEnd('[failures] SELECT COUNT(*)');
     const totalHistoricalCount = countRows[0]?.total ?? 0;
 
+    const veldnaamMap = await getVeldnaamMap();
+
     const failures = [
-      ...activeRows.map(mapRow),
-      ...resolvedRows.map(mapRow),
+      ...activeRows.map((r) => mapRow(r, veldnaamMap)),
+      ...resolvedRows.map((r) => mapRow(r, veldnaamMap)),
     ];
 
     console.timeEnd('[failures] TOTAL getAllFailures');

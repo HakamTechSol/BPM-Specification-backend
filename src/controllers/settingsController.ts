@@ -8,6 +8,7 @@ interface InstellingenRow extends RowDataPacket {
   vrijverbruikinstelling: string | null;
   stroomtarief: string | null;
   factuurinstelling: string | null;
+  session_duration_days: number | null;
   eigenaar: string | null;
 }
 
@@ -33,7 +34,7 @@ export async function getSettings(
   try {
     const pool = getPool();
     const [rows] = await pool.execute<InstellingenRow[]>(
-      'SELECT idinstellingen, stroominstelling, vrijverbruikinstelling, eigenaar FROM instellingen WHERE idinstellingen = 0'
+      'SELECT idinstellingen, stroominstelling, vrijverbruikinstelling, session_duration_days, eigenaar FROM instellingen WHERE idinstellingen = 0'
     );
 
     if (rows.length === 0) {
@@ -42,6 +43,7 @@ export async function getSettings(
         id: 0,
         stroominstelling: ["6", "8", "10", "12", "16"],
         vrijverbruikinstelling: ["0", "1", "2", "4", "8"],
+        sessionDurationDays: 30,
         eigenaar: {},
       });
       return;
@@ -76,6 +78,7 @@ export async function getSettings(
       id: row.idinstellingen,
       stroominstelling,
       vrijverbruikinstelling,
+      sessionDurationDays: row.session_duration_days ?? 30,
       eigenaar,
     });
   } catch (error) {
@@ -84,12 +87,12 @@ export async function getSettings(
 }
 
 export async function updateSettings(
-  req: Request<object, object, { eigenaar?: Partial<Eigenaar> }>,
+  req: Request<object, object, { eigenaar?: Partial<Eigenaar>; sessionDurationDays?: number }>,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const { eigenaar } = req.body;
+    const { eigenaar, sessionDurationDays } = req.body;
 
     const pool = getPool();
     
@@ -111,18 +114,37 @@ export async function updateSettings(
     // Merge provided eigenaar fields with existing
     const updatedEigenaar = { ...currentEigenaar, ...eigenaar };
 
+    // Validate session_duration_days (1-365, 1 decimal)
+    let validDuration: number | null = null;
+    if (sessionDurationDays !== undefined) {
+      const d = Math.round(sessionDurationDays * 10) / 10;
+      validDuration = Math.max(1, Math.min(365, d));
+    }
+
     if (existing.length === 0) {
-      // Insert new settings row
-      await pool.execute(
-        'INSERT INTO instellingen (idinstellingen, eigenaar) VALUES (0, ?)',
-        [JSON.stringify(updatedEigenaar)]
-      );
+      if (validDuration !== null) {
+        await pool.execute(
+          'INSERT INTO instellingen (idinstellingen, eigenaar, session_duration_days) VALUES (0, ?, ?)',
+          [JSON.stringify(updatedEigenaar), validDuration]
+        );
+      } else {
+        await pool.execute(
+          'INSERT INTO instellingen (idinstellingen, eigenaar) VALUES (0, ?)',
+          [JSON.stringify(updatedEigenaar)]
+        );
+      }
     } else {
-      // Update existing settings
-      await pool.execute(
-        'UPDATE instellingen SET eigenaar = ? WHERE idinstellingen = 0',
-        [JSON.stringify(updatedEigenaar)]
-      );
+      if (validDuration !== null) {
+        await pool.execute(
+          'UPDATE instellingen SET eigenaar = ?, session_duration_days = ? WHERE idinstellingen = 0',
+          [JSON.stringify(updatedEigenaar), validDuration]
+        );
+      } else {
+        await pool.execute(
+          'UPDATE instellingen SET eigenaar = ? WHERE idinstellingen = 0',
+          [JSON.stringify(updatedEigenaar)]
+        );
+      }
     }
 
     res.json({ success: true });

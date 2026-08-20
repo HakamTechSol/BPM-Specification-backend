@@ -4,7 +4,8 @@ const ALGORITHM = 'aes-256-cbc';
 const IV_LENGTH = 16;
 const KEY_ENCODING: BufferEncoding = 'utf8';
 const OUTPUT_ENCODING: BufferEncoding = 'hex';
-const DELIMITER = ':';
+const DELIMITER = '-';
+const LEGACY_DELIMITER = ':';
 
 function getKey(): Buffer {
   const key = process.env.ENCRYPTION_KEY;
@@ -30,7 +31,11 @@ export function encryptPitchId(pltsnr: number): string {
 }
 
 export function decryptPitchId(token: string): number {
-  const parts = token.split(DELIMITER);
+  // Try new delimiter first, fall back to legacy ":" for old QR codes
+  let parts = token.split(DELIMITER);
+  if (parts.length !== 2) {
+    parts = token.split(LEGACY_DELIMITER);
+  }
   if (parts.length !== 2) {
     throw new Error('Invalid token format');
   }

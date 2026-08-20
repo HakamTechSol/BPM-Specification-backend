@@ -3,6 +3,7 @@ import { exec } from 'child_process';
 import { RowDataPacket } from 'mysql2';
 import { getPool } from '../utils/db';
 import { decryptPitchId } from '../utils/cryptoHelper';
+import { getVeldnaamMap } from '../utils/veldnaam';
 
 interface TriggerSyncBody {
   pitchId: number;
@@ -124,6 +125,7 @@ export async function triggerSyncCommand(
 interface PitchListRow extends RowDataPacket {
   pltsnr: number;
   pltsnm: string;
+  veldnr: number;
   stat: number;
   gewenst: number;
   kwhnu: number;
@@ -156,13 +158,16 @@ export async function getAllPitches(
 
     console.time('[pitch] SELECT gegevens');
     const [rows] = await pool.execute<PitchListRow[]>(
-      'SELECT pltsnr, pltsnm, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode, gastnaam FROM gegevens ORDER BY pltsnr ASC'
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode, gastnaam FROM gegevens ORDER BY pltsnr ASC'
     );
     console.timeEnd('[pitch] SELECT gegevens');
+
+    const veldnaamMap = await getVeldnaamMap();
 
     const pitches = rows.map((row) => ({
       pitchId: row.pltsnr,
       pitchName: row.pltsnm,
+      veldNaam: veldnaamMap[row.veldnr] ?? '',
       stat: row.stat,
       gewenst: row.gewenst,
       kwhnu: row.kwhnu,

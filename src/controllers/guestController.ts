@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { RowDataPacket } from 'mysql2';
 import { getPool } from '../utils/db';
+import { getVeldnaamMap } from '../utils/veldnaam';
 
 // In-memory rate-limiting cache for guest reset requests
 const resetCooldowns = new Map<number, number>(); // pitchId -> timestamp of last reset
@@ -9,6 +10,7 @@ const RESET_COOLDOWN_MS = 60000; // 60 seconds
 interface PitchStatusRow extends RowDataPacket {
   pltsnr: number;
   pltsnm: string;
+  veldnr: number;
   stat: number;
   gewenst: number;
   kwhnu: number;
@@ -35,7 +37,7 @@ export async function getPitchStatus(
     const pool = getPool();
     console.time(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);
     const [rows] = await pool.execute<PitchStatusRow[]>(
-      'SELECT pltsnr, pltsnm, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode FROM gegevens WHERE pltsnr = ?',
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode FROM gegevens WHERE pltsnr = ?',
       [pitchId]
     );
     console.timeEnd(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);
@@ -46,9 +48,11 @@ export async function getPitchStatus(
     }
 
     const row = rows[0];
+    const veldnaamMap = await getVeldnaamMap();
     res.json({
       pitchId: row.pltsnr,
       pitchName: row.pltsnm,
+      veldNaam: veldnaamMap[row.veldnr] ?? '',
       stat: row.stat,
       gewenst: row.gewenst,
       kwhnu: row.kwhnu,
@@ -86,14 +90,33 @@ export async function resetPitchError(
     }
 
     const pool = getPool();
-    const [rows] = await pool.execute<RowDataPacket[]>(
+
+    // Step 1: Read current imax before resetting errorcode
+    const [pitchRows] = await pool.execute<RowDataPacket[]>(
+      'SELECT imax FROM gegevens WHERE pltsnr = ?',
+      [pitchId]
+    );
+    const originalImax = pitchRows.length > 0 ? pitchRows[0].imax : null;
+
+    // Step 2: Reset errorcode
+    const [resetResult] = await pool.execute<RowDataPacket[]>(
       'UPDATE gegevens SET errorcode = 0 WHERE pltsnr = ?',
       [pitchId]
     );
 
-    if ((rows as any).affectedRows === 0) {
+    if ((resetResult as any).affectedRows === 0) {
       res.status(404).json({ error: 'Pitch not found' });
       return;
+    }
+
+    // Step 3: Wait for legacy PHP polling cycle, then re-write original imax
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+
+    if (originalImax !== null) {
+      await pool.execute(
+        'UPDATE gegevens SET imax = ? WHERE pltsnr = ?',
+        [originalImax, pitchId]
+      );
     }
 
     // Record this reset in cooldown cache
