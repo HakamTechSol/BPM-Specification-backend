@@ -49,6 +49,27 @@ export async function getPitchStatus(
 
     const row = rows[0];
     const veldnaamMap = await getVeldnaamMap();
+
+    // Fetch active reservation for this pitch
+    let reservation = null;
+    try {
+      const [resRows] = await pool.execute<RowDataPacket[]>(
+        'SELECT CheckIn, ReserveringNummer, usage_limit, e_start FROM reservering WHERE PlaatsId = ? AND CheckOut IS NULL ORDER BY CheckIn DESC LIMIT 1',
+        [pitchId]
+      );
+      if (resRows.length > 0) {
+        const r = resRows[0];
+        reservation = {
+          checkIn: r.CheckIn,
+          reserveringNummer: r.ReserveringNummer,
+          usageLimit: r.usage_limit,
+          eStart: r.e_start,
+        };
+      }
+    } catch {
+      // Reservation query is non-critical; continue without it
+    }
+
     res.json({
       pitchId: row.pltsnr,
       pitchName: row.pltsnm,
@@ -60,6 +81,7 @@ export async function getPitchStatus(
       iverb: row.iverb,
       maxAmperage: row.imax,
       errorcode: row.errorcode,
+      reservation,
     });
   } catch (error) {
     next(error);

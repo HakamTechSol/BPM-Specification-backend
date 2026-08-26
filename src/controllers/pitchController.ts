@@ -7,7 +7,7 @@ import { getVeldnaamMap } from '../utils/veldnaam';
 
 interface TriggerSyncBody {
   pitchId: number;
-  action: 'toggle_power' | 'set_amperage' | 'set_power_state';
+  action: 'toggle_power' | 'set_amperage' | 'set_power_state' | 'set_free_usage' | 'set_afstandbesturing';
   value?: number;
 }
 
@@ -17,7 +17,7 @@ interface PitchRow extends RowDataPacket {
   gewenst: number;
 }
 
-const VALID_ACTIONS = ['toggle_power', 'set_amperage', 'set_power_state'];
+const VALID_ACTIONS = ['toggle_power', 'set_amperage', 'set_power_state', 'set_free_usage', 'set_afstandbesturing'];
 
 export async function triggerSyncCommand(
   req: Request<object, object, TriggerSyncBody>,
@@ -39,7 +39,7 @@ export async function triggerSyncCommand(
       return;
     }
 
-    if ((action === 'set_amperage' || action === 'set_power_state') && value === undefined) {
+    if ((action === 'set_amperage' || action === 'set_power_state' || action === 'set_free_usage') && value === undefined) {
       res.status(400).json({ error: `value is required for action: ${action}` });
       return;
     }
@@ -90,6 +90,32 @@ export async function triggerSyncCommand(
           return;
         }
         break;
+
+      case 'set_free_usage':
+        if (typeof value === 'number' && value >= 0 && value <= 255) {
+          targetValue = value;
+          await pool.execute<RowDataPacket[]>(
+            'UPDATE gegevens SET kwhvrij = ? WHERE pltsnr = ?',
+            [targetValue, pitchId]
+          );
+        } else {
+          res.status(400).json({ error: 'value must be a number between 0 and 255' });
+          return;
+        }
+        break;
+
+      case 'set_afstandbesturing':
+        if (typeof value === 'number' && [0, 1, 3].includes(value)) {
+          targetValue = value;
+          await pool.execute<RowDataPacket[]>(
+            'UPDATE gegevens SET afstandbesturing = ? WHERE pltsnr = ?',
+            [targetValue, pitchId]
+          );
+        } else {
+          res.status(400).json({ error: 'value must be 0 (Lokaal), 1 (Afstand), or 3 (Afstand aan)' });
+          return;
+        }
+        break;
     }
 
     // Step 1: Send hardware trigger to EIB gateway (127.0.0.1:9019)
@@ -132,13 +158,23 @@ interface PitchListRow extends RowDataPacket {
   kwhtot: number;
   iverb: number;
   imax: number;
+  kwhvrij: number;
   errorcode: number;
   gastnaam: string | null;
+  afstandbesturing: number;
 }
 
 interface StoringRow extends RowDataPacket {
   idstoring: number;
   PlaatsId: number;
+}
+
+interface ReservationRow extends RowDataPacket {
+  PlaatsId: number;
+  CheckIn: string;
+  ReserveringNummer: string | null;
+  usage_limit: number | null;
+  e_start: number | null;
 }
 
 const ERRORCODE_TO_STORING: Record<number, { storingCode: number; description: string }> = {
@@ -158,7 +194,7 @@ export async function getAllPitches(
 
     console.time('[pitch] SELECT gegevens');
     const [rows] = await pool.execute<PitchListRow[]>(
-      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode, gastnaam FROM gegevens ORDER BY pltsnr ASC'
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, kwhvrij, errorcode, gastnaam, afstandbesturing FROM gegevens ORDER BY pltsnr ASC'
     );
     console.timeEnd('[pitch] SELECT gegevens');
 
@@ -174,9 +210,44 @@ export async function getAllPitches(
       kwhtot: row.kwhtot,
       iverb: row.iverb,
       maxAmperage: row.imax,
+      freeUsage: row.kwhvrij,
       errorcode: row.errorcode,
       guestName: row.gastnaam,
+      afstandbesturing: row.afstandbesturing,
+      reservation: null as { checkIn: string; reserveringNummer: string | null; usageLimit: number | null; eStart: number | null } | null,
     }));
+
+    // Fetch active reservations for all pitches in one query
+    if (pitches.length > 0) {
+      const pitchIds = pitches.map((p) => p.pitchId);
+      const placeholders = pitchIds.map(() => '?').join(',');
+      console.time('[pitch] SELECT active reservations');
+      const [resRows] = await pool.execute<ReservationRow[]>(
+        `SELECT PlaatsId, CheckIn, ReserveringNummer, usage_limit, e_start
+         FROM reservering
+         WHERE CheckOut IS NULL AND PlaatsId IN (${placeholders})
+         ORDER BY CheckIn DESC`,
+        pitchIds
+      );
+      console.timeEnd('[pitch] SELECT active reservations');
+
+      // Map: take first (most recent) reservation per pitch
+      const resMap = new Map<number, ReservationRow>();
+      for (const r of resRows) {
+        if (!resMap.has(r.PlaatsId)) resMap.set(r.PlaatsId, r);
+      }
+      for (const p of pitches) {
+        const r = resMap.get(p.pitchId);
+        if (r) {
+          p.reservation = {
+            checkIn: r.CheckIn,
+            reserveringNummer: r.ReserveringNummer,
+            usageLimit: r.usage_limit,
+            eStart: r.e_start,
+          };
+        }
+      }
+    }
 
     // Failure detection: check for errorcode != 0 and insert into storing if no active failure exists
     const errorPitches = rows.filter((row) => row.errorcode !== 0);
