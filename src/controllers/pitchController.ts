@@ -170,7 +170,7 @@ interface StoringRow extends RowDataPacket {
 }
 
 interface ReservationRow extends RowDataPacket {
-  PlaatsId: number;
+  PlaatsNummer: string;
   CheckIn: string;
   ReserveringNummer: string | null;
   usage_limit: number | null;
@@ -217,72 +217,82 @@ export async function getAllPitches(
       reservation: null as { checkIn: string; reserveringNummer: string | null; usageLimit: number | null; eStart: number | null } | null,
     }));
 
-    // Fetch active reservations for all pitches in one query
+    // Fetch active reservations for all pitches in one query (non-critical:
+    // a failure here must not take down the whole pitch list)
     if (pitches.length > 0) {
-      const pitchIds = pitches.map((p) => p.pitchId);
-      const placeholders = pitchIds.map(() => '?').join(',');
-      console.time('[pitch] SELECT active reservations');
-      const [resRows] = await pool.execute<ReservationRow[]>(
-        `SELECT PlaatsId, CheckIn, ReserveringNummer, usage_limit, e_start
-         FROM reservering
-         WHERE CheckOut IS NULL AND PlaatsId IN (${placeholders})
-         ORDER BY CheckIn DESC`,
-        pitchIds
-      );
-      console.timeEnd('[pitch] SELECT active reservations');
+      try {
+        const pitchNames = pitches.map((p) => p.pitchName);
+        const namePlaceholders = pitchNames.map(() => '?').join(',');
+        console.time('[pitch] SELECT active reservations');
+        const [resRows] = await pool.execute<ReservationRow[]>(
+          `SELECT PlaatsNummer, CheckIn, ReserveringNummer, usage_limit, e_start
+           FROM reservering
+           WHERE CheckOut IS NULL AND PlaatsNummer IN (${namePlaceholders})
+           ORDER BY CheckIn DESC`,
+          pitchNames
+        );
+        console.timeEnd('[pitch] SELECT active reservations');
 
-      // Map: take first (most recent) reservation per pitch
-      const resMap = new Map<number, ReservationRow>();
-      for (const r of resRows) {
-        if (!resMap.has(r.PlaatsId)) resMap.set(r.PlaatsId, r);
-      }
-      for (const p of pitches) {
-        const r = resMap.get(p.pitchId);
-        if (r) {
-          p.reservation = {
-            checkIn: r.CheckIn,
-            reserveringNummer: r.ReserveringNummer,
-            usageLimit: r.usage_limit,
-            eStart: r.e_start,
-          };
+        // Map: take first (most recent) reservation per pitch name
+        const resMap = new Map<string, ReservationRow>();
+        for (const r of resRows) {
+          if (!resMap.has(r.PlaatsNummer)) resMap.set(r.PlaatsNummer, r);
         }
+        for (const p of pitches) {
+          const r = resMap.get(p.pitchName);
+          if (r) {
+            p.reservation = {
+              checkIn: r.CheckIn,
+              reserveringNummer: r.ReserveringNummer,
+              usageLimit: r.usage_limit,
+              eStart: r.e_start,
+            };
+          }
+        }
+      } catch (err) {
+        console.error('[pitch] Failed to load reservations:', err);
       }
     }
 
     // Failure detection: check for errorcode != 0 and insert into storing if no active failure exists
-    const errorPitches = rows.filter((row) => row.errorcode !== 0);
-    if (errorPitches.length > 0) {
-      const errorIds = errorPitches.map((r) => r.pltsnr);
-      const placeholders = errorIds.map(() => '?').join(',');
+    // (non-critical: a failure here must not take down the whole pitch list)
+    try {
+      const errorPitches = rows.filter((row) => row.errorcode !== 0);
+      if (errorPitches.length > 0) {
+        const errorIds = errorPitches.map((r) => r.pltsnr);
+        const placeholders = errorIds.map(() => '?').join(',');
 
-      console.time('[pitch] SELECT storing (active failures check)');
-      const [existingFailures] = await pool.execute<StoringRow[]>(
-        `SELECT PlaatsId FROM storing WHERE PlaatsId IN (${placeholders}) AND EindStoring IS NULL`,
-        errorIds
-      );
-      console.timeEnd('[pitch] SELECT storing (active failures check)');
-      const existingSet = new Set(existingFailures.map((r) => r.PlaatsId));
-
-      let insertCount = 0;
-      for (const row of errorPitches) {
-        if (existingSet.has(row.pltsnr)) continue;
-
-        const mapping = ERRORCODE_TO_STORING[row.errorcode] ?? {
-          storingCode: row.errorcode,
-          description: `Automatisch gedetecteerd: errorcode ${row.errorcode}`,
-        };
-
-        console.time(`[pitch] INSERT storing (pitch ${row.pltsnr})`);
-        await pool.execute(
-          'INSERT INTO storing (PlaatsId, PlaatsNaam, StartStoring, StoringCode, Omschrijving) VALUES (?, ?, NOW(), ?, ?)',
-          [row.pltsnr, row.pltsnm, mapping.storingCode, mapping.description]
+        console.time('[pitch] SELECT storing (active failures check)');
+        const [existingFailures] = await pool.execute<StoringRow[]>(
+          `SELECT PlaatsId FROM storing WHERE PlaatsId IN (${placeholders}) AND EindStoring IS NULL`,
+          errorIds
         );
-        console.timeEnd(`[pitch] INSERT storing (pitch ${row.pltsnr})`);
-        insertCount++;
+        console.timeEnd('[pitch] SELECT storing (active failures check)');
+        const existingSet = new Set(existingFailures.map((r) => r.PlaatsId));
+
+        let insertCount = 0;
+        for (const row of errorPitches) {
+          if (existingSet.has(row.pltsnr)) continue;
+
+          const mapping = ERRORCODE_TO_STORING[row.errorcode] ?? {
+            storingCode: row.errorcode,
+            description: `Automatisch gedetecteerd: errorcode ${row.errorcode}`,
+          };
+
+          console.time(`[pitch] INSERT storing (pitch ${row.pltsnr})`);
+          await pool.execute(
+            'INSERT INTO storing (PlaatsId, PlaatsNaam, StartStoring, StoringCode, Omschrijving) VALUES (?, ?, NOW(), ?, ?)',
+            [row.pltsnr, row.pltsnm, mapping.storingCode, mapping.description]
+          );
+          console.timeEnd(`[pitch] INSERT storing (pitch ${row.pltsnr})`);
+          insertCount++;
+        }
+        if (insertCount > 0) {
+          console.log(`[pitch] Inserted ${insertCount} new failure records`);
+        }
       }
-      if (insertCount > 0) {
-        console.log(`[pitch] Inserted ${insertCount} new failure records`);
-      }
+    } catch (err) {
+      console.error('[pitch] Failure detection INSERT failed:', err);
     }
 
     console.timeEnd('[pitch] TOTAL getAllPitches');

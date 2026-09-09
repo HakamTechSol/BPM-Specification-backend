@@ -11,6 +11,7 @@ import guestRoutes from './routes/guestRoutes';
 import settingsRoutes from './routes/settingsRoutes';
 import failureRoutes from './routes/failureRoutes';
 import maintenanceRoutes from './routes/maintenanceRoutes';
+import { closePool } from './utils/db';
 
 dotenv.config();
 
@@ -78,5 +79,23 @@ server.on('error', (err: NodeJS.ErrnoException) => {
     process.exit(1);
   }
 });
+
+// Graceful shutdown: close the HTTP server and release the DB pool so
+// connections don't leak into the next process on restart/deploy.
+// Without this, MySQL connections accumulate past max_connections and
+// every DB-backed route starts returning 500 with "Too many connections".
+const shutdown = (signal: string) => {
+  console.log(`\nReceived ${signal}, shutting down gracefully...`);
+  server.close(() => {
+    closePool()
+      .catch((err) => console.error('Error closing DB pool:', err))
+      .finally(() => process.exit(0));
+  });
+  // Force-exit if connections refuse to drain (e.g. long-running requests)
+  setTimeout(() => process.exit(1), 10_000).unref();
+};
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
 
 export default app;

@@ -54,8 +54,8 @@ export async function getPitchStatus(
     let reservation = null;
     try {
       const [resRows] = await pool.execute<RowDataPacket[]>(
-        'SELECT CheckIn, ReserveringNummer, usage_limit, e_start FROM reservering WHERE PlaatsId = ? AND CheckOut IS NULL ORDER BY CheckIn DESC LIMIT 1',
-        [pitchId]
+        'SELECT CheckIn, ReserveringNummer, usage_limit, e_start FROM reservering WHERE PlaatsNummer = ? AND CheckOut IS NULL ORDER BY CheckIn DESC LIMIT 1',
+        [row.pltsnm]
       );
       if (resRows.length > 0) {
         const r = resRows[0];
