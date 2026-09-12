@@ -40,12 +40,18 @@ export async function login(
         const [rows] = await pool.execute<RowDataPacket[]>(
           'SELECT session_duration_days FROM instellingen WHERE idinstellingen = 0'
         );
-        if (rows.length > 0 && rows[0].session_duration_days) {
-          const days = Number(rows[0].session_duration_days);
+        const days = rows.length > 0 ? Number(rows[0]?.session_duration_days) : NaN;
+        if (Number.isFinite(days) && days > 0) {
           expiresIn = `${days}d` as unknown as SignOptions['expiresIn'];
+        } else {
+          // Missing/NULL value (e.g. settings never saved): fall back to the
+          // same default the settings endpoint reports, never a silent short token.
+          expiresIn = '30d';
+          console.warn('[auth] session_duration_days missing in instellingen, falling back to 30d');
         }
-      } catch {
-        // Fall back to default expiry if DB read fails
+      } catch (err) {
+        expiresIn = '30d';
+        console.error('[auth] Failed reading session_duration_days, falling back to 30d:', err);
       }
     }
 
