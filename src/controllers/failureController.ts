@@ -60,7 +60,7 @@ export async function getAllFailures(
     const [activeRows] = await pool.execute<StoringRow[]>(
       `SELECT s.*, g.veldnr FROM storing s
        LEFT JOIN gegevens g ON s.PlaatsId = g.pltsnr
-       WHERE s.EindStoring IS NULL ORDER BY s.StartStoring DESC`
+       WHERE s.EindStoring IS NULL AND g.pltsnr < 1000 ORDER BY s.StartStoring DESC`
     );
     console.timeEnd('[failures] SELECT active');
 
@@ -69,7 +69,7 @@ export async function getAllFailures(
     const [resolvedRows] = await pool.execute<StoringRow[]>(
       `SELECT s.*, g.veldnr FROM storing s
        LEFT JOIN gegevens g ON s.PlaatsId = g.pltsnr
-       WHERE s.EindStoring IS NOT NULL AND s.EindStoring >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+       WHERE s.EindStoring IS NOT NULL AND s.EindStoring >= DATE_SUB(NOW(), INTERVAL 30 DAY) AND g.pltsnr < 1000
        ORDER BY s.EindStoring DESC LIMIT 50`
     );
     console.timeEnd('[failures] SELECT resolved (30d + LIMIT 50)');
@@ -89,10 +89,19 @@ export async function getAllFailures(
       ...resolvedRows.map((r) => mapRow(r, veldnaamMap)),
     ];
 
+    // Severity summary for ACTIVE failures only. Derived from activeRows, which
+    // is already filtered by `g.pltsnr < 1000`, so the counter badges always
+    // strictly match the active failure list rendered by the frontend.
+    const activeCounts = { critical: 0, high: 0, warning: 0 };
+    for (const row of activeRows) {
+      activeCounts[deriveSeverity(row.StoringCode)] += 1;
+    }
+
     console.timeEnd('[failures] TOTAL getAllFailures');
     res.json({
       failures,
       activeCount: activeRows.length,
+      activeCounts,
       recentResolvedCount: resolvedRows.length,
       totalHistoricalCount,
     });

@@ -26,6 +26,17 @@ interface Eigenaar {
   'btw-nummer'?: string;
 }
 
+// System-wide options that admins may enable/disable from the settings page.
+const STROOM_OPTIONS = ['6', '8', '10', '12', '16'];
+const VRIJ_OPTIONS = ['0', '1', '2', '4', '8'];
+
+// Keep only values from the allowed set, de-duplicated and in canonical order.
+function normalizeOptionArray(value: unknown, allowed: string[]): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const selected = new Set(value.map((v) => String(v)));
+  return allowed.filter((option) => selected.has(option));
+}
+
 export async function getSettings(
   _req: Request,
   res: Response,
@@ -87,15 +98,24 @@ export async function getSettings(
 }
 
 export async function updateSettings(
-  req: Request<object, object, { eigenaar?: Partial<Eigenaar>; sessionDurationDays?: number }>,
+  req: Request<
+    object,
+    object,
+    {
+      eigenaar?: Partial<Eigenaar>;
+      sessionDurationDays?: number;
+      stroominstelling?: string[];
+      vrijverbruikinstelling?: string[];
+    }
+  >,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    const { eigenaar, sessionDurationDays } = req.body;
+    const { eigenaar, sessionDurationDays, stroominstelling, vrijverbruikinstelling } = req.body;
 
     const pool = getPool();
-    
+
     // Check if settings row exists
     const [existing] = await pool.execute<RowDataPacket[]>(
       'SELECT idinstellingen, eigenaar FROM instellingen WHERE idinstellingen = 0'
@@ -121,30 +141,50 @@ export async function updateSettings(
       validDuration = Math.max(1, Math.min(365, d));
     }
 
+    // Validate option arrays: only known options, de-duplicated, canonical order.
+    // `null` means the field was not provided and should stay untouched.
+    const normalizedStroom = normalizeOptionArray(stroominstelling, STROOM_OPTIONS);
+    const normalizedVrij = normalizeOptionArray(vrijverbruikinstelling, VRIJ_OPTIONS);
+
     if (existing.length === 0) {
+      const columns = ['idinstellingen', 'eigenaar'];
+      const values: (string | number)[] = [0, JSON.stringify(updatedEigenaar)];
       if (validDuration !== null) {
-        await pool.execute(
-          'INSERT INTO instellingen (idinstellingen, eigenaar, session_duration_days) VALUES (0, ?, ?)',
-          [JSON.stringify(updatedEigenaar), validDuration]
-        );
-      } else {
-        await pool.execute(
-          'INSERT INTO instellingen (idinstellingen, eigenaar) VALUES (0, ?)',
-          [JSON.stringify(updatedEigenaar)]
-        );
+        columns.push('session_duration_days');
+        values.push(validDuration);
       }
+      if (normalizedStroom !== null) {
+        columns.push('stroominstelling');
+        values.push(JSON.stringify(normalizedStroom));
+      }
+      if (normalizedVrij !== null) {
+        columns.push('vrijverbruikinstelling');
+        values.push(JSON.stringify(normalizedVrij));
+      }
+      await pool.execute(
+        `INSERT INTO instellingen (${columns.join(', ')}) VALUES (${columns.map(() => '?').join(', ')})`,
+        values
+      );
     } else {
+      const sets = ['eigenaar = ?'];
+      const values: (string | number)[] = [JSON.stringify(updatedEigenaar)];
       if (validDuration !== null) {
-        await pool.execute(
-          'UPDATE instellingen SET eigenaar = ?, session_duration_days = ? WHERE idinstellingen = 0',
-          [JSON.stringify(updatedEigenaar), validDuration]
-        );
-      } else {
-        await pool.execute(
-          'UPDATE instellingen SET eigenaar = ? WHERE idinstellingen = 0',
-          [JSON.stringify(updatedEigenaar)]
-        );
+        sets.push('session_duration_days = ?');
+        values.push(validDuration);
       }
+      if (normalizedStroom !== null) {
+        sets.push('stroominstelling = ?');
+        values.push(JSON.stringify(normalizedStroom));
+      }
+      if (normalizedVrij !== null) {
+        sets.push('vrijverbruikinstelling = ?');
+        values.push(JSON.stringify(normalizedVrij));
+      }
+      values.push(0);
+      await pool.execute(
+        `UPDATE instellingen SET ${sets.join(', ')} WHERE idinstellingen = ?`,
+        values
+      );
     }
 
     res.json({ success: true });

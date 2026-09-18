@@ -37,7 +37,7 @@ export async function getPitchStatus(
     const pool = getPool();
     console.time(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);
     const [rows] = await pool.execute<PitchStatusRow[]>(
-      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, errorcode FROM gegevens WHERE pltsnr = ?',
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, errorcode FROM gegevens WHERE pltsnr = ?',
       [pitchId]
     );
     console.timeEnd(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);

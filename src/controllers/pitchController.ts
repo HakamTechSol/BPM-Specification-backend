@@ -194,7 +194,7 @@ export async function getAllPitches(
 
     console.time('[pitch] SELECT gegevens');
     const [rows] = await pool.execute<PitchListRow[]>(
-      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, kwhtot, iverb, imax, kwhvrij, errorcode, gastnaam, afstandbesturing FROM gegevens ORDER BY pltsnr ASC'
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, kwhvrij, errorcode, gastnaam, afstandbesturing FROM gegevens WHERE pltsnr < 1000 ORDER BY pltsnr ASC'
     );
     console.timeEnd('[pitch] SELECT gegevens');
 
