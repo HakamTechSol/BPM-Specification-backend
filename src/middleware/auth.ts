@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { getJwtSecret } from '../utils/jwtSecret';
 
 export interface AuthPayload {
   username: string;
@@ -16,7 +17,7 @@ export function authenticateToken(
   res: Response,
   next: NextFunction
 ): void {
-  const JWT_SECRET = process.env.JWT_SECRET || 'blueplug_jwt_secret_change_in_production_2026';
+  const JWT_SECRET = getJwtSecret();
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 

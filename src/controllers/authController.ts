@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { getPool } from '../utils/db';
 import { type RowDataPacket } from 'mysql2';
+import { getJwtSecret } from '../utils/jwtSecret';
 
 interface LoginBody {
   username: string;
@@ -15,7 +16,7 @@ export async function login(
   next: NextFunction
 ): Promise<void> {
   try {
-    const JWT_SECRET = process.env.JWT_SECRET || 'blueplug_jwt_secret_change_in_production_2026';
+    const JWT_SECRET = getJwtSecret();
     const DEFAULT_EXPIRES_IN = (process.env.JWT_EXPIRES_IN || '8h') as SignOptions['expiresIn'];
     const { username, password, remember } = req.body;
 

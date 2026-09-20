@@ -26,15 +26,24 @@ interface Eigenaar {
   'btw-nummer'?: string;
 }
 
-// System-wide options that admins may enable/disable from the settings page.
-const STROOM_OPTIONS = ['6', '8', '10', '12', '16'];
-const VRIJ_OPTIONS = ['0', '1', '2', '4', '8'];
-
-// Keep only values from the allowed set, de-duplicated and in canonical order.
-function normalizeOptionArray(value: unknown, allowed: string[]): string[] | null {
+// Option arrays stored as JSON strings in `instellingen`. They may contain any
+// numeric values (integers or decimals), e.g. ["8","10","12","14","16"] or
+// ["6.5","8.0","10.5"]. We normalize by numeric value: de-duplicate, keep the
+// first string representation, sort ascending. Returns null when the field was
+// not provided (so it stays untouched on update).
+function normalizeNumberArray(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
-  const selected = new Set(value.map((v) => String(v)));
-  return allowed.filter((option) => selected.has(option));
+  const seen = new Map<number, string>();
+  for (const v of value) {
+    const raw = typeof v === 'string' ? v.trim() : String(v);
+    if (raw === '') continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n)) continue;
+    if (!seen.has(n)) seen.set(n, raw);
+  }
+  return [...seen.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, raw]) => raw);
 }
 
 export async function getSettings(
@@ -141,10 +150,11 @@ export async function updateSettings(
       validDuration = Math.max(1, Math.min(365, d));
     }
 
-    // Validate option arrays: only known options, de-duplicated, canonical order.
-    // `null` means the field was not provided and should stay untouched.
-    const normalizedStroom = normalizeOptionArray(stroominstelling, STROOM_OPTIONS);
-    const normalizedVrij = normalizeOptionArray(vrijverbruikinstelling, VRIJ_OPTIONS);
+    // Validate option arrays: accept arbitrary numeric values (integers or
+    // decimals), de-duplicated and sorted ascending. `null` means the field
+    // was not provided and should stay untouched.
+    const normalizedStroom = normalizeNumberArray(stroominstelling);
+    const normalizedVrij = normalizeNumberArray(vrijverbruikinstelling);
 
     if (existing.length === 0) {
       const columns = ['idinstellingen', 'eigenaar'];

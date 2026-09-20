@@ -15,6 +15,7 @@ interface PitchRow extends RowDataPacket {
   pltsnr: number;
   pltsnm: string;
   gewenst: number;
+  afstandbesturing: number | null;
 }
 
 const VALID_ACTIONS = ['toggle_power', 'set_amperage', 'set_power_state', 'set_free_usage', 'set_afstandbesturing'];
@@ -46,18 +47,37 @@ export async function triggerSyncCommand(
 
     const pool = getPool();
     let targetValue: number;
+    let pitchRow: PitchRow | null = null;
+
+    // ── Remote-control guard (server-enforced) ────────────────────────────
+    // Local power control (toggle_power / set_power_state) is disabled while a
+    // pitch is under remote/cloud control: afstandbesturing > 0 means
+    // "Afstand" (1) or "Afstand aan" (3), 0 (or NULL) means "Lokaal". This
+    // must be enforced here in the backend — a frontend-only disable can be
+    // bypassed by any direct API call (curl, Postman, scripts, etc.).
+    if (action === 'toggle_power' || action === 'set_power_state') {
+      const [rows] = await pool.execute<PitchRow[]>(
+        'SELECT pltsnr, gewenst, afstandbesturing FROM gegevens WHERE pltsnr = ?',
+        [pitchId]
+      );
+      if (rows.length === 0) {
+        res.status(404).json({ error: 'Pitch not found' });
+        return;
+      }
+      pitchRow = rows[0];
+      if ((pitchRow.afstandbesturing ?? 0) > 0) {
+        res.status(403).json({ error: 'Pitch is under remote control — local toggle disabled' });
+        return;
+      }
+    }
 
     switch (action) {
       case 'toggle_power': {
-        const [rows] = await pool.execute<PitchRow[]>(
-          'SELECT gewenst FROM gegevens WHERE pltsnr = ?',
-          [pitchId]
-        );
-        if (rows.length === 0) {
-          res.status(404).json({ error: 'Pitch not found' });
+        if (!pitchRow) {
+          res.status(500).json({ error: 'Pitch state not loaded' });
           return;
         }
-        targetValue = rows[0].gewenst === 1 ? 0 : 1;
+        targetValue = pitchRow.gewenst === 1 ? 0 : 1;
         await pool.execute<RowDataPacket[]>(
           'UPDATE gegevens SET gewenst = ? WHERE pltsnr = ?',
           [targetValue, pitchId]
@@ -221,25 +241,27 @@ export async function getAllPitches(
     // a failure here must not take down the whole pitch list)
     if (pitches.length > 0) {
       try {
-        const pitchNames = pitches.map((p) => p.pitchName);
-        const namePlaceholders = pitchNames.map(() => '?').join(',');
+        // reservering.PlaatsNummer stores the pitch NUMBER (gegevens.pltsnr),
+        // not the pitch name (gegevens.pltsnm). Joined on pltsnr as a string.
+        const pitchIds = pitches.map((p) => String(p.pitchId));
+        const idPlaceholders = pitchIds.map(() => '?').join(',');
         console.time('[pitch] SELECT active reservations');
         const [resRows] = await pool.execute<ReservationRow[]>(
           `SELECT PlaatsNummer, CheckIn, ReserveringNummer, usage_limit, e_start
            FROM reservering
-           WHERE CheckOut IS NULL AND PlaatsNummer IN (${namePlaceholders})
+           WHERE CheckOut IS NULL AND PlaatsNummer IN (${idPlaceholders})
            ORDER BY CheckIn DESC`,
-          pitchNames
+          pitchIds
         );
         console.timeEnd('[pitch] SELECT active reservations');
 
-        // Map: take first (most recent) reservation per pitch name
+        // Map: take first (most recent) reservation per pitch id
         const resMap = new Map<string, ReservationRow>();
         for (const r of resRows) {
           if (!resMap.has(r.PlaatsNummer)) resMap.set(r.PlaatsNummer, r);
         }
         for (const p of pitches) {
-          const r = resMap.get(p.pitchName);
+          const r = resMap.get(String(p.pitchId));
           if (r) {
             p.reservation = {
               checkIn: r.CheckIn,

@@ -53,9 +53,11 @@ export async function getPitchStatus(
     // Fetch active reservation for this pitch
     let reservation = null;
     try {
+      // reservering.PlaatsNummer stores the pitch NUMBER (gegevens.pltsnr),
+      // not the pitch name (gegevens.pltsnm). Match on pltsnr as a string.
       const [resRows] = await pool.execute<RowDataPacket[]>(
         'SELECT CheckIn, ReserveringNummer, usage_limit, e_start FROM reservering WHERE PlaatsNummer = ? AND CheckOut IS NULL ORDER BY CheckIn DESC LIMIT 1',
-        [row.pltsnm]
+        [String(row.pltsnr)]
       );
       if (resRows.length > 0) {
         const r = resRows[0];

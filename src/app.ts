@@ -15,6 +15,12 @@ import { closePool } from './utils/db';
 
 dotenv.config();
 
+// Fail fast at startup (not at first request) when JWT_SECRET is missing in a
+// production build: the .env on the server is the single, stable source of the
+// secret and must survive restarts and deployments untouched.
+import { getJwtSecret } from './utils/jwtSecret';
+getJwtSecret();
+
 const app = express();
 const PORT = parseInt(process.env.PORT || '3000', 10);
 
