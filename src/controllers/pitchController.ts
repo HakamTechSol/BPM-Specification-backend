@@ -50,12 +50,18 @@ export async function triggerSyncCommand(
     let pitchRow: PitchRow | null = null;
 
     // ── Remote-control guard (server-enforced) ────────────────────────────
-    // Local power control (toggle_power / set_power_state) is disabled while a
-    // pitch is under remote/cloud control: afstandbesturing > 0 means
-    // "Afstand" (1) or "Afstand aan" (3), 0 (or NULL) means "Lokaal". This
-    // must be enforced here in the backend — a frontend-only disable can be
-    // bypassed by any direct API call (curl, Postman, scripts, etc.).
-    if (action === 'toggle_power' || action === 'set_power_state') {
+    // Local power control (toggle_power / set_power_state) and local settings
+    // (set_amperage / set_free_usage) are disabled while a pitch is under
+    // remote/cloud control: afstandbesturing > 0 means "Afstand" (1) or
+    // "Afstand aan" (3), 0 (or NULL) means "Lokaal". This must be enforced
+    // here in the backend — a frontend-only disable can be bypassed by any
+    // direct API call (curl, Postman, scripts, etc.).
+    if (
+      action === 'toggle_power' ||
+      action === 'set_power_state' ||
+      action === 'set_amperage' ||
+      action === 'set_free_usage'
+    ) {
       const [rows] = await pool.execute<PitchRow[]>(
         'SELECT pltsnr, gewenst, afstandbesturing FROM gegevens WHERE pltsnr = ?',
         [pitchId]
@@ -66,7 +72,7 @@ export async function triggerSyncCommand(
       }
       pitchRow = rows[0];
       if ((pitchRow.afstandbesturing ?? 0) > 0) {
-        res.status(403).json({ error: 'Pitch is under remote control — local toggle disabled' });
+        res.status(403).json({ error: 'Pitch is under remote control — local control disabled' });
         return;
       }
     }
