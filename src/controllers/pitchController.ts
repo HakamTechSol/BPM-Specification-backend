@@ -4,6 +4,13 @@ import { RowDataPacket } from 'mysql2';
 import { getPool } from '../utils/db';
 import { decryptPitchId } from '../utils/cryptoHelper';
 import { getVeldnaamMap } from '../utils/veldnaam';
+import {
+  applyFreeUsageWrite,
+  computeFreeUsage,
+  FREE_DAYS_SQL,
+  planFreeUsageWrite,
+  readFreeUsageKwh,
+} from '../utils/freeUsage';
 
 interface TriggerSyncBody {
   pitchId: number;
@@ -16,6 +23,10 @@ interface PitchRow extends RowDataPacket {
   pltsnm: string;
   gewenst: number;
   afstandbesturing: number | null;
+  // #FREEUSAGEDB needed to convert kWh to pulses and to compare against
+  // kwhvrijprev when writing the free allowance.
+  kwhpulsen: number | null;
+  kwhvrijprev: number | null;
 }
 
 const VALID_ACTIONS = ['toggle_power', 'set_amperage', 'set_power_state', 'set_free_usage', 'set_afstandbesturing'];
@@ -63,7 +74,9 @@ export async function triggerSyncCommand(
       action === 'set_free_usage'
     ) {
       const [rows] = await pool.execute<PitchRow[]>(
-        'SELECT pltsnr, gewenst, afstandbesturing FROM gegevens WHERE pltsnr = ?',
+        // #FREEUSAGEDB kwhpulsen and kwhvrijprev are read here so
+        // set_free_usage can follow the legacy write sequence.
+        'SELECT pltsnr, gewenst, afstandbesturing, kwhpulsen, kwhvrijprev FROM gegevens WHERE pltsnr = ?',
         [pitchId]
       );
       if (rows.length === 0) {
@@ -117,18 +130,30 @@ export async function triggerSyncCommand(
         }
         break;
 
-      case 'set_free_usage':
-        if (typeof value === 'number' && value >= 0 && value <= 255) {
-          targetValue = value;
-          await pool.execute<RowDataPacket[]>(
-            'UPDATE gegevens SET kwhvrij = ? WHERE pltsnr = ?',
-            [targetValue, pitchId]
-          );
-        } else {
-          res.status(400).json({ error: 'value must be a number between 0 and 255' });
+      case 'set_free_usage': {
+        if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+          res.status(400).json({ error: 'value must be a number of 0 or more (kWh per day)' });
           return;
         }
+        if (!pitchRow) {
+          res.status(500).json({ error: 'Pitch state not loaded' });
+          return;
+        }
+
+        // #FREEUSAGEDB Legacy veld.php sequence: the free allowance is stored
+        // in pulses (kWh * kwhpulsen), kwhvrijprev keeps the value the legacy
+        // system compares against, and nextvrijaftrekcheck is only moved when
+        // that previous value actually changes. All of it in one transaction.
+        const plan = planFreeUsageWrite({
+          kWh: value,
+          kwhpulsen: pitchRow.kwhpulsen,
+          kwhvrijprev: pitchRow.kwhvrijprev,
+        });
+        targetValue = plan.newKwhvrij;
+
+        await applyFreeUsageWrite(await pool.getConnection(), pitchId, plan);
         break;
+      }
 
       case 'set_afstandbesturing':
         if (typeof value === 'number' && [0, 1, 3].includes(value)) {
@@ -184,7 +209,9 @@ interface PitchListRow extends RowDataPacket {
   kwhtot: number;
   iverb: number;
   imax: number;
-  kwhvrij: number;
+  // #FREEUSAGEDB kwhvrij/kwhpulsen feed the "Vrij verbruik" row; read-only.
+  kwhvrij: number | null;
+  kwhpulsen: number | null;
   errorcode: number;
   gastnaam: string | null;
   afstandbesturing: number;
@@ -201,6 +228,7 @@ interface ReservationRow extends RowDataPacket {
   ReserveringNummer: string | null;
   usage_limit: number | null;
   e_start: number | null;
+  freeDays: number;
 }
 
 const ERRORCODE_TO_STORING: Record<number, { storingCode: number; description: string }> = {
@@ -219,12 +247,23 @@ export async function getAllPitches(
     const pool = getPool();
 
     console.time('[pitch] SELECT gegevens');
+    // #FREEUSAGEDB kwhvrij (free allowance in pulses) and kwhpulsen (pulses per
+    // kWh) are read here for the free-usage rows; they are never written.
     const [rows] = await pool.execute<PitchListRow[]>(
-      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, kwhvrij, errorcode, gastnaam, afstandbesturing FROM gegevens WHERE pltsnr < 1000 ORDER BY pltsnr ASC'
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, kwhvrij, kwhpulsen, errorcode, gastnaam, afstandbesturing FROM gegevens WHERE pltsnr < 1000 ORDER BY pltsnr ASC'
     );
     console.timeEnd('[pitch] SELECT gegevens');
 
     const veldnaamMap = await getVeldnaamMap();
+
+    // Free-usage inputs per pitch, kept out of the response payload.
+    // #FREEUSAGEDB
+    const freeUsageInputs = new Map<number, { kwhvrij: number | null; kwhpulsen: number | null; currentMeter: number }>(
+      rows.map((row) => [
+        row.pltsnr,
+        { kwhvrij: row.kwhvrij, kwhpulsen: row.kwhpulsen, currentMeter: Number(row.kwhtot) },
+      ])
+    );
 
     const pitches = rows.map((row) => ({
       pitchId: row.pltsnr,
@@ -236,11 +275,22 @@ export async function getAllPitches(
       kwhtot: row.kwhtot,
       iverb: row.iverb,
       maxAmperage: row.imax,
-      freeUsage: row.kwhvrij,
+      // #FREEUSAGEDB freeUsage is returned in kWh (kwhvrij / kwhpulsen), so the
+      // chips show the same number the legacy system bills.
+      freeUsage: readFreeUsageKwh(row.kwhvrij, row.kwhpulsen),
       errorcode: row.errorcode,
       guestName: row.gastnaam,
       afstandbesturing: row.afstandbesturing,
-      reservation: null as { checkIn: string; reserveringNummer: string | null; usageLimit: number | null; eStart: number | null } | null,
+      reservation: null as {
+        checkIn: string;
+        reserveringNummer: string | null;
+        usageLimit: number | null;
+        eStart: number | null;
+        freeDays: number;
+        freeUsagePerDay: number;
+        freeUsageTotal: number;
+        difference: number;
+      } | null,
     }));
 
     // Fetch active reservations for all pitches in one query (non-critical:
@@ -249,14 +299,17 @@ export async function getAllPitches(
       try {
         // reservering.PlaatsNummer stores the pitch NUMBER (gegevens.pltsnr),
         // not the pitch name (gegevens.pltsnm). Joined on pltsnr as a string.
+        // freeDays is measured in SQL so MySQL's own clock decides the stay
+        // length, exactly like the legacy CheckIn (written with MySQL now()).
         const pitchIds = pitches.map((p) => String(p.pitchId));
         const idPlaceholders = pitchIds.map(() => '?').join(',');
         console.time('[pitch] SELECT active reservations');
         const [resRows] = await pool.execute<ReservationRow[]>(
-          `SELECT PlaatsNummer, CheckIn, ReserveringNummer, usage_limit, e_start
-           FROM reservering
-           WHERE CheckOut IS NULL AND PlaatsNummer IN (${idPlaceholders})
-           ORDER BY CheckIn DESC`,
+          `SELECT r.PlaatsNummer, r.CheckIn, r.ReserveringNummer, r.usage_limit, r.e_start,
+                  ${FREE_DAYS_SQL} AS freeDays
+           FROM reservering r
+           WHERE r.CheckOut IS NULL AND r.PlaatsNummer IN (${idPlaceholders})
+           ORDER BY r.CheckIn DESC`,
           pitchIds
         );
         console.timeEnd('[pitch] SELECT active reservations');
@@ -269,11 +322,20 @@ export async function getAllPitches(
         for (const p of pitches) {
           const r = resMap.get(String(p.pitchId));
           if (r) {
+            const input = freeUsageInputs.get(p.pitchId);
             p.reservation = {
               checkIn: r.CheckIn,
               reserveringNummer: r.ReserveringNummer,
               usageLimit: r.usage_limit,
               eStart: r.e_start,
+              // #FREEUSAGEDB free usage comes from gegevens.kwhvrij / kwhpulsen.
+              ...computeFreeUsage({
+                kwhvrij: input?.kwhvrij ?? null,
+                kwhpulsen: input?.kwhpulsen ?? null,
+                freeDays: Number(r.freeDays),
+                eStart: r.e_start,
+                currentMeter: input?.currentMeter ?? 0,
+              }),
             };
           }
         }

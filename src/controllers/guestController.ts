@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { RowDataPacket } from 'mysql2';
 import { getPool } from '../utils/db';
 import { getVeldnaamMap } from '../utils/veldnaam';
+import { computeFreeUsage, FREE_DAYS_SQL, readFreeUsageKwh } from '../utils/freeUsage';
 
 // In-memory rate-limiting cache for guest reset requests
 const resetCooldowns = new Map<number, number>(); // pitchId -> timestamp of last reset
@@ -18,6 +19,17 @@ interface PitchStatusRow extends RowDataPacket {
   iverb: number;
   imax: number;
   errorcode: number;
+  // #FREEUSAGEDB kwhvrij/kwhpulsen feed the guest's "Vrij verbruik" row.
+  kwhvrij: number | null;
+  kwhpulsen: number | null;
+}
+
+interface ReservationRow extends RowDataPacket {
+  CheckIn: string;
+  ReserveringNummer: string | null;
+  usage_limit: number | null;
+  e_start: number | null;
+  freeDays: number;
 }
 
 export async function getPitchStatus(
@@ -36,8 +48,10 @@ export async function getPitchStatus(
 
     const pool = getPool();
     console.time(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);
+    // #FREEUSAGEDB kwhvrij (free allowance in pulses) and kwhpulsen (pulses per
+    // kWh) are read here for the free-usage rows; they are never written.
     const [rows] = await pool.execute<PitchStatusRow[]>(
-      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, errorcode FROM gegevens WHERE pltsnr = ?',
+      'SELECT pltsnr, pltsnm, veldnr, stat, gewenst, kwhnu, COALESCE(NULLIF(kWhtotaal, 0), kwhtot) AS kwhtot, iverb, imax, errorcode, kwhvrij, kwhpulsen FROM gegevens WHERE pltsnr = ?',
       [pitchId]
     );
     console.timeEnd(`[guest] SELECT gegevens WHERE pltsnr=${pitchId}`);
@@ -55,8 +69,13 @@ export async function getPitchStatus(
     try {
       // reservering.PlaatsNummer stores the pitch NUMBER (gegevens.pltsnr),
       // not the pitch name (gegevens.pltsnm). Match on pltsnr as a string.
-      const [resRows] = await pool.execute<RowDataPacket[]>(
-        'SELECT CheckIn, ReserveringNummer, usage_limit, e_start FROM reservering WHERE PlaatsNummer = ? AND CheckOut IS NULL ORDER BY CheckIn DESC LIMIT 1',
+      // freeDays is measured in SQL so MySQL's own clock decides the stay
+      // length, exactly like the legacy CheckIn (written with MySQL now()).
+      const [resRows] = await pool.execute<ReservationRow[]>(
+        `SELECT r.CheckIn, r.ReserveringNummer, r.usage_limit, r.e_start, ${FREE_DAYS_SQL} AS freeDays
+         FROM reservering r
+         WHERE r.PlaatsNummer = ? AND r.CheckOut IS NULL
+         ORDER BY r.CheckIn DESC LIMIT 1`,
         [String(row.pltsnr)]
       );
       if (resRows.length > 0) {
@@ -66,6 +85,14 @@ export async function getPitchStatus(
           reserveringNummer: r.ReserveringNummer,
           usageLimit: r.usage_limit,
           eStart: r.e_start,
+          // #FREEUSAGEDB free usage comes from gegevens.kwhvrij / kwhpulsen.
+          ...computeFreeUsage({
+            kwhvrij: row.kwhvrij,
+            kwhpulsen: row.kwhpulsen,
+            freeDays: Number(r.freeDays),
+            eStart: r.e_start,
+            currentMeter: Number(row.kwhtot),
+          }),
         };
       }
     } catch {
@@ -82,6 +109,9 @@ export async function getPitchStatus(
       kwhtot: row.kwhtot,
       iverb: row.iverb,
       maxAmperage: row.imax,
+      // #FREEUSAGEDB daily free allowance in kWh (kwhvrij / kwhpulsen), the
+      // same value the manager screen shows for this pitch.
+      freeUsage: readFreeUsageKwh(row.kwhvrij, row.kwhpulsen),
       errorcode: row.errorcode,
       reservation,
     });

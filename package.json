@@ -8,6 +8,7 @@
     "build": "tsc",
     "build:secure": "tsc && node scripts/obfuscate.js",
     "start": "node dist/app.js",
+    "test": "node --test src/**/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
